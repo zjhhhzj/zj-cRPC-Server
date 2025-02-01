@@ -65,10 +65,10 @@ private:
 };
 
 int main() {
-    RpcClient client("127.0.0.1", 5000);
+    RpcClient client("127.0.0.1", 5555);
 
     try {
-        string result = client.CallMethod("Add", "10,20");
+        string result = client.CallMethod("reverse", "zjhhh");
         cout << "Result: " << result << endl;
     } catch (const exception& e) {
         cerr << "Error: " << e.what() << endl;
