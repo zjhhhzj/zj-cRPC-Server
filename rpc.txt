@@ -1,0 +1,130 @@
+1. RpcRequest 常用函数
+RpcRequest 用于封装客户端发送的请求数据，通常包括方法名、参数等信息。
+
+常用函数
+设置方法名
+
+void set_method_name(const std::string& method_name);
+设置要调用的远程方法名。
+
+获取方法名
+
+std::string get_method_name() const;
+获取请求中的方法名。
+
+设置参数
+
+void set_parameters(const std::vector<std::string>& params);
+设置调用方法的参数列表。
+
+获取参数
+
+std::vector<std::string> get_parameters() const;
+获取请求中的参数列表。
+
+序列化
+
+std::string serialize() const;
+将 RpcRequest 对象序列化为字符串（例如 JSON 或二进制格式），以便通过网络传输。
+
+反序列化
+
+bool deserialize(const std::string& data);
+从字符串中反序列化出 RpcRequest 对象。
+
+示例
+RpcRequest request;
+request.set_method_name("add");
+request.set_parameters({"3", "5"});
+
+std::string serialized_request = request.serialize();
+// 通过网络发送 serialized_request
+2. RpcResponse 常用函数
+RpcResponse 用于封装服务器返回的响应数据，通常包括调用结果或错误信息。
+
+常用函数
+设置结果
+
+void set_result(const std::string& result);
+设置远程方法调用的结果。
+
+获取结果
+
+std::string get_result() const;
+获取响应中的结果。
+
+设置错误信息
+
+void set_error(const std::string& error_message);
+设置调用失败时的错误信息。
+
+获取错误信息
+
+std::string get_error() const;
+获取响应中的错误信息。
+
+序列化
+
+std::string serialize() const;
+将 RpcResponse 对象序列化为字符串，以便通过网络传输。
+
+反序列化
+
+bool deserialize(const std::string& data);
+从字符串中反序列化出 RpcResponse 对象。
+
+示例
+RpcResponse response;
+response.set_result("8");
+
+std::string serialized_response = response.serialize();
+// 通过网络发送 serialized_response
+3. 序列化与反序列化
+RPC 框架通常需要将 RpcRequest 和 RpcResponse 序列化为字符串（例如 JSON、Protobuf 或二进制格式），以便通过网络传输。常见的序列化方式包括：
+
+JSON：易于阅读和调试，适合文本传输。
+
+Protobuf：高效且紧凑，适合二进制传输。
+
+XML：较少使用，但在某些场景中仍有应用。
+
+JSON 示例
+json
+复制
+// RpcRequest
+{
+  "method_name": "add",
+  "parameters": ["3", "5"]
+}
+
+// RpcResponse
+{
+  "result": "8",
+  "error": ""
+}
+Protobuf 示例
+protobuf
+复制
+// RpcRequest
+message RpcRequest {
+  string method_name = 1;
+  repeated string parameters = 2;
+}
+
+// RpcResponse
+message RpcResponse {
+  string result = 1;
+  string error = 2;
+}
+4. 总结
+RpcRequest：
+
+用于封装客户端请求，包括方法名和参数。
+
+常用函数：set_method_name、get_method_name、set_parameters、get_parameters、serialize、deserialize。
+
+RpcResponse：
+
+用于封装服务器响应，包括结果和错误信息。
+
+常用函数：set_result、get_result、set_error、get_error、serialize、deserialize。

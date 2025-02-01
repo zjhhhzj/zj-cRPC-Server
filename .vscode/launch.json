@@ -7,9 +7,9 @@
       "request": "launch",
       "args": [],
       "stopAtEntry": false,
-      "externalConsole": true,
-      "cwd": "g:/zj-cRPC-Server",
-      "program": "g:/zj-cRPC-Server/build/Debug/outDebug",
+      "externalConsole": false,
+      "cwd": "/home/zj/zj-cRPC-Server",
+      "program": "/home/zj/zj-cRPC-Server/build/Debug/outDebug",
       "MIMode": "gdb",
       "miDebuggerPath": "gdb",
       "setupCommands": [

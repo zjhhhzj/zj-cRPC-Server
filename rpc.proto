@@ -1,0 +1,16 @@
+syntax = "proto3";
+
+package rpc;
+
+// RPC 请求
+message RpcRequest {
+  string method = 1;  // 方法名
+  string params = 2;  // 参数（JSON 或其他格式）
+}
+
+// RPC 响应
+message RpcResponse {
+  int32 code = 1;     // 响应码（0 表示成功）
+  string result = 2;  // 返回值（JSON 或其他格式）
+  string error = 3;   // 错误信息（如果有）
+}
