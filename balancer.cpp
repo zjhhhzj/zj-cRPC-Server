@@ -1,8 +1,11 @@
 //g++ balancer.cpp  -o balancer
 #include <iostream>
-#include <thread>
 #include <vector>
+#include <queue>
+#include <thread>
 #include <mutex>
+#include <condition_variable>
+#include <chrono>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
@@ -10,18 +13,163 @@
 
 using namespace std;
 
-class LoadBalancer {
+class ServerConnectionManager {
+private:
+    vector<int> server_ports_;   // 服务器端口列表
+    vector<int> server_sockets_; // 服务器 socket 列表，-1 表示不可用
+    queue<int> failed_servers_;  // 存储失效服务器的索引
+    mutex server_mutex_;         // 服务器列表的互斥锁
+    mutex queue_mutex_;          // 队列的互斥锁
+
+    // 控制重连线程
+    thread reconnect_thread_;    // 重连线程
+    mutex reconnect_mutex_;      // 控制线程启动和停止的互斥锁
+    bool reconnect_running_;     // 标志变量，控制线程运行状态
+    int queue_count;      // 队列数量
+
 public:
-    LoadBalancer(int port, const vector<int>& server_ports)
-        : port_(port), server_ports_(server_ports), connection_count_(0) {}
+    ServerConnectionManager(const vector<int>& server_ports): server_ports_(server_ports), reconnect_running_(false) {
+        server_sockets_.resize(server_ports.size(), -1); // 初始化为 -1 表示不可用
+    }
 
     void Start() {
-        // 提前与后端服务器建立连接
-        if (!InitializeServerConnections()) {
-            cerr << "Failed to initialize server connections" << endl;
-            exit(EXIT_FAILURE);
+        // 初始化所有服务器连接
+        for (size_t i = 0; i < server_ports_.size(); ++i) {
+            if (!ConnectToServer(i)) {
+                MarkServerAsFailed(i);
+            }
+        }
+    }
+
+    void StartReconnectProcess() {
+        if (!reconnect_running_){
+            lock_guard<mutex> lock(reconnect_mutex_);
+            if (reconnect_running_) {
+                cout << "Reconnect process is already running." << endl;
+                return;
+            }
+            reconnect_running_ = true;
+        }else{
+            cout << "Reconnect process is already running." << endl;
+            return;
+        }
+        reconnect_thread_ = thread(&ServerConnectionManager::ReconnectServers, this);
+        cout << "Reconnect process started." << endl;
+    }
+
+    void StopReconnectProcess() {
+        {
+            lock_guard<mutex> lock(reconnect_mutex_);
+            if (!reconnect_running_) {
+                cout << "Reconnect process is not running." << endl;
+                return;
+            }
+            reconnect_running_ = false;
+        }
+        if (reconnect_thread_.joinable()) {
+            reconnect_thread_.join(); // 等待线程安全退出
+        }
+        cout << "Reconnect process stopped." << endl;
+    }
+
+    int GetServerSocket(size_t index) {
+        lock_guard<mutex> lock(server_mutex_);
+        return server_sockets_[index];
+    }
+
+    size_t GetServerCount() const {
+        return server_ports_.size();
+    }
+
+    void MarkServerAsFailed(size_t index) {
+        {
+            lock_guard<mutex> lock(server_mutex_);
+            server_sockets_[index] = -1; // 标记为不可用
+        }
+        {
+            lock_guard<mutex> lock(queue_mutex_);
+            failed_servers_.push(index); // 将失效服务器加入队列
+        }
+    }
+
+private:
+    bool ConnectToServer(size_t index) {
+        int server_socket = socket(AF_INET, SOCK_STREAM, 0);
+        if (server_socket < 0) {
+            perror("Socket creation failed");
+            return false;
         }
 
+        struct sockaddr_in server_address;
+        server_address.sin_family = AF_INET;
+        server_address.sin_addr.s_addr = inet_addr("127.0.0.1"); // 假设服务器在本地
+        server_address.sin_port = htons(server_ports_[index]);
+
+        if (connect(server_socket, (struct sockaddr*)&server_address, sizeof(server_address)) < 0) {
+            perror("Connection to server failed");
+            close(server_socket);
+            return false;
+        }
+
+        {
+            lock_guard<mutex> lock(server_mutex_);
+            server_sockets_[index] = server_socket;
+        }
+        cout << "Connected to server on port " << server_ports_[index] << endl;
+        return true;
+    }
+
+    void ReconnectServers() {
+
+        while (reconnect_running_) {
+            // 如果队列为空但未达到休眠次数，短暂等待再检查
+            this_thread::sleep_for(chrono::seconds(10));
+
+            lock_guard<mutex> lock(queue_mutex_);
+            if (failed_servers_.empty()) {
+                continue;
+            }
+            queue_count=failed_servers_.size();
+            while(queue_count--){
+                int failed_index = failed_servers_.front();
+                failed_servers_.pop();
+
+                cout << "Attempting to reconnect to server on port " << server_ports_[failed_index] << endl;
+                if (ConnectToServer(failed_index)) {
+                    cout << "Reconnected to server on port " << server_ports_[failed_index] << endl;
+                } else {
+                    // 如果重连失败，将其重新放回队列
+                    failed_servers_.push(failed_index);
+                    this_thread::sleep_for(chrono::seconds(5)); // 等待 5 秒后重试
+                }
+            }
+        }
+
+        cout << "Reconnect thread exiting..." << endl;
+    }
+};
+
+class LoadBalancer {
+private:
+    ServerConnectionManager server_connection_manager_; // 服务器连接管理器
+    int connection_count_;
+    mutex count_mutex_;
+public:
+    LoadBalancer(const vector<int>& server_ports)
+        : server_connection_manager_(server_ports), connection_count_(0) {}
+
+    void Start() {
+        // 启动服务器连接管理器
+        server_connection_manager_.Start();
+        cout << "Load balancer started. Ready to forward requests." << endl;
+
+        // // 模拟客户端请求的处理逻辑
+        // while (true) {
+        //     int client_socket = AcceptClient();
+        //     if (client_socket >= 0) {
+        //         thread(&LoadBalancer::ForwardRequest, this, client_socket).detach();
+        //     }
+        // }
         int server_fd = socket(AF_INET, SOCK_STREAM, 0);
         if (server_fd < 0) {
             perror("Socket creation failed");
@@ -66,102 +214,48 @@ public:
     }
 
 private:
-    int port_;
-    vector<int> server_ports_;
-    vector<int> server_sockets_; // 保存与后端服务器的长连接
-    int connection_count_;
-    mutex count_mutex_;
-
-    // 初始化与后端服务器的长连接
-    bool InitializeServerConnections() {
-        for (int target_port : server_ports_) {
-            int server_socket = socket(AF_INET, SOCK_STREAM, 0);
-            if (server_socket < 0) {
-                perror("Socket creation failed");
-                return false;
-            }
-
-            struct sockaddr_in server_addr;
-            server_addr.sin_family = AF_INET;
-            server_addr.sin_port = htons(target_port);
-            if (inet_pton(AF_INET, "127.0.0.1", &server_addr.sin_addr) <= 0) {
-                perror("Invalid address");
-                close(server_socket);
-                return false;
-            }
-
-            if (connect(server_socket, (struct sockaddr*)&server_addr, sizeof(server_addr)) < 0) {
-                perror("Connection to server failed");
-                close(server_socket);
-                return false;
-            }
-
-            // 保存连接
-            server_sockets_.push_back(server_socket);
-            cout << "Connected to server on port " << target_port << endl;
-        }
-        return true;
-    }
-
     void ForwardRequest(int client_socket) {
-        // 确定目标服务器
         int server_index;
+        int server_socket;
+
+        // 确定目标服务器
         {
             lock_guard<mutex> lock(count_mutex_);
-            server_index = connection_count_ % server_ports_.size();
-            connection_count_++;
+            do {
+                server_index = connection_count_ % server_connection_manager_.GetServerCount();
+                connection_count_++;
+            } while ((server_socket = server_connection_manager_.GetServerSocket(server_index)) == -1); // 跳过失效的服务器
         }
 
-        int server_socket = server_sockets_[server_index];
-        cout << "Forwarding request to server on port " << server_ports_[server_index] << endl;
+        cout << "Forwarding request to server on port " << server_index << endl;
 
-        // 转发数据：从客户端读取，发送到目标服务器
         char buffer[1024];
         int valread = read(client_socket, buffer, 1024);
         if (valread > 0) {
-            // 尝试将数据发送到目标服务器
             ssize_t bytes_sent = send(server_socket, buffer, valread, 0);
             if (bytes_sent < 0) {
                 perror("Send to server failed");
-
-                // 如果发送失败，说明连接可能已失效，需要移除该连接
-                RemoveServerConnection(server_index);
-                close(client_socket); // 关闭客户端连接
+                server_connection_manager_.MarkServerAsFailed(server_index); // 标记为失效
+                close(client_socket);
                 return;
             }
 
-            // 尝试从目标服务器读取响应
             int valwrite = read(server_socket, buffer, 1024);
             if (valwrite > 0) {
                 send(client_socket, buffer, valwrite, 0);
             } else if (valwrite <= 0) {
-                // 如果读取失败，说明服务器连接可能已关闭
                 perror("Read from server failed");
-                RemoveServerConnection(server_index);
+                server_connection_manager_.MarkServerAsFailed(server_index); // 标记为失效
             }
         }
 
-        close(client_socket); // 关闭客户端连接，但保持与后端服务器的长连接
-    }
-
-    void RemoveServerConnection(int server_index) {
-        lock_guard<mutex> lock(count_mutex_);
-
-        // 关闭失效的 socket
-        int failed_socket = server_sockets_[server_index];
-        close(failed_socket);
-
-        // 从 server_sockets_ 和 server_ports_ 中移除失效的服务器
-        server_sockets_.erase(server_sockets_.begin() + server_index);
-        server_ports_.erase(server_ports_.begin() + server_index);
-
-        cout << "Removed server connection on port " << server_ports_[server_index] << endl;
+        close(client_socket); // 关闭客户端连接
     }
 };
 
 int main() {
-    vector<int> server_ports = {5000, 5001, 5002, 5003, 5004, 5005, 5006, 5007, 5008, 5009, 5010};
-    LoadBalancer lb(5555, server_ports);
+    vector<int> server_ports = {5000, 5001, 5002, 5003, 5004, 5005, 5006, 5007, 5008, 5009};
+    LoadBalancer lb(5011, server_ports);
     lb.Start();
     return 0;
 }
