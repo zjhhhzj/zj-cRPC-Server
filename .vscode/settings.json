@@ -7,7 +7,10 @@
     "string": "cpp",
     "iostream": "cpp",
     "condition_variable": "cpp",
-    "cstring": "cpp"
+    "cstring": "cpp",
+    "csignal": "cpp",
+    "mutex": "cpp",
+    "random": "cpp"
   },
   "C_Cpp_Runner.msvcBatchPath": "",
   "C_Cpp.errorSquiggles": "disabled"

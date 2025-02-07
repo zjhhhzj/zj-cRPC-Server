@@ -129,7 +129,7 @@ void SignalHandler(int signum) {
 int main() {
     signal(SIGINT, SignalHandler); // 捕获 Ctrl+C 信号
 
-    vector<int> ports = {5000, 5001, 5002, 5003, 5004, 5005, 5006, 5007, 5008, 5009, 5010};
+    vector<int> ports = {5000, 5001, 5002, 5003, 5004, 5005, 5006, 5007, 5008, 5009};
 
     for (int port : ports) {
         pid_t pid = fork();

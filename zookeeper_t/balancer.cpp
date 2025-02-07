@@ -11,7 +11,6 @@
 #include <ifaddrs.h>  // 用于获取本地 IP 地址
 #include <netdb.h>    // 用于 getnameinfo、NI_MAXHOST、NI_NUMERICHOST
 #include <zookeeper/zookeeper.h>  // Zookeeper C API
-
 using namespace std;
 
 class LoadBalancer {
@@ -23,7 +22,7 @@ private:
 
     string server_zookeeper_hosts_;            // 服务器 Zookeeper 集群地址
     string balancer_zookeeper_hosts_;          // 负载均衡节点 Zookeeper 集群地址
-    string root_path_ = "/servers";            // 服务器根节点路径
+    string servers_root_path_ = "/servers";            // 服务器根节点路径
     string balancer_root_path_ = "/balancers"; // 负载均衡节点根节点路径
 
     string balancer_ip_; // 负载均衡节点的 IP
@@ -101,27 +100,45 @@ public:
     }
 
 private:
+    // 确保根路径存在（异步检查并创建）
+    void EnsureRootPathExists() {
+        zoo_aexists(server_zh_, balancer_root_path_.c_str(), 0,
+                    [](int rc, const struct Stat *stat, const void *data) {
+                        LoadBalancer *lb = (LoadBalancer *)data;
+                        if (rc == ZNONODE) {
+                            cout << "Root path does not exist. Creating..." << endl;
+                            zoo_acreate(lb->server_zh_, lb->balancer_root_path_.c_str(), nullptr, 0,
+                                        &ZOO_OPEN_ACL_UNSAFE, 0,
+                                        [](int rc, const char *value, const void *data) {
+                                            if (rc == ZOK) {
+                                                cout << "Root path created successfully." << endl;
+                                            } else {
+                                                cerr << "Failed to create root path, error: " << zerror(rc) << endl;
+                                            }
+                                        },
+                                        nullptr);
+                        } else if (rc == ZOK) {
+                            cout << "Root path exists." << endl;
+                        } else {
+                            cerr << "Failed to check root path, error: " << zerror(rc) << endl;
+                        }
+                    },
+                    this);
+    }
+    
     // 连接到服务器 Zookeeper 集群
     void ConnectToServerZookeeper() {
-        server_zh_ = zookeeper_init(server_zookeeper_hosts_.c_str(), nullptr, 30000, nullptr, this, 0);
+        server_zh_ = zookeeper_init(server_zookeeper_hosts_.c_str(), ServerWatcher, 30000, nullptr, this, 0);
         if (!server_zh_) {
             cerr << "Failed to connect to server Zookeeper" << endl;
             exit(EXIT_FAILURE);
         }
 
-        // 异步检查根节点是否存在
-        zoo_aexists(server_zh_, root_path_.c_str(), 1, ExistsCallback, this);
-    }
+        server_zookeeper_available_ = true;
+        cout << "Connected to server Zookeeper successfully." << endl;
 
-    // 动态更新服务器列表
-    void UpdateServerList() {
-        if (!server_zookeeper_available_) {
-            cerr << "Server Zookeeper is not available. Cannot update server list." << endl;
-            return;
-        }
-
-        // 异步获取子节点
-        zoo_aget_children(server_zh_, root_path_.c_str(), 1, GetChildrenCallback, this);
+        // 初次获取服务器列表
+        UpdateServerList();
     }
 
     // 与服务器建立长连接
@@ -151,9 +168,61 @@ private:
         return sock;
     }
 
+     // 动态更新服务器列表（异步获取子节点）
+    void UpdateServerList() {
+        if (!server_zookeeper_available_) {
+            cerr << "Server Zookeeper is not available. Cannot update server list." << endl;
+            return;
+        }
+
+        zoo_aget_children(server_zh_, servers_root_path_.c_str(), 1,
+                          [](int rc, const struct String_vector *strings, const void *data) {
+                              LoadBalancer *lb = (LoadBalancer *)data;
+                              if (rc != ZOK) {
+                                  cerr << "Failed to get children: " << zerror(rc) << endl;
+                                  return;
+                              }
+
+                              vector<pair<string, int>> new_servers;
+                              vector<int> new_sockets;
+
+                              for (int i = 0; i < strings->count; ++i) {
+                                  string node_name = strings->data[i];
+                                  size_t pos = node_name.find(':');
+                                  if (pos == string::npos) {
+                                      cerr << "Invalid node name: " << node_name << endl;
+                                      continue;
+                                  }
+
+                                  string ip = node_name.substr(0, pos);
+                                  int port = stoi(node_name.substr(pos + 1));
+
+                                  int sock = lb->ConnectToServer(ip, port);
+                                  if (sock >= 0) {
+                                      new_servers.emplace_back(ip, port);
+                                      new_sockets.push_back(sock);
+                                  }
+                              }
+
+                              // 更新服务器列表
+                              {
+                                  lock_guard<mutex> lock(lb->servers_mutex_);
+                                  for (int sock : lb->server_sockets_) {
+                                      close(sock); // 关闭旧的 socket
+                                  }
+                                  lb->servers_ = std::move(new_servers);
+                                  lb->server_sockets_ = std::move(new_sockets);
+                              }
+
+                              cout << "Server list updated. Total servers: " << lb->servers_.size() << endl;
+                          },
+                          this);
+    }
+
     // 连接到负载均衡节点 Zookeeper 集群
     void ConnectToBalancerZookeeper() {
-        balancer_zh_ = zookeeper_init(balancer_zookeeper_hosts_.c_str(), nullptr, 30000, nullptr, this, 0);
+        //balancer_zh_ = zookeeper_init(balancer_zookeeper_hosts_.c_str(), nullptr, 30000, nullptr, this, 0);
+        balancer_zh_=server_zh_;
         if (!balancer_zh_) {
             cerr << "Failed to connect to balancer Zookeeper" << endl;
             exit(EXIT_FAILURE);
@@ -162,18 +231,13 @@ private:
         balancer_zookeeper_available_ = true;
         cout << "Connected to balancer Zookeeper successfully." << endl;
 
-        // 注册负载均衡节点信息
+        EnsureRootPathExists();
+
+        sleep(1);
+        // 注册负载均衡节点信息 RegisterBalancerNode
         RegisterBalancerNode();
     }
-
-    // 注册负载均衡节点信息
-    void RegisterBalancerNode() {
-        string balancer_node_path = balancer_root_path_ + "/" + balancer_ip_ + ":" + to_string(balancer_port_);
-
-        // 异步创建节点
-        zoo_acreate(balancer_zh_, balancer_node_path.c_str(), nullptr, -1, &ZOO_OPEN_ACL_UNSAFE, ZOO_EPHEMERAL, CreateCallback, this);
-    }
-
+    
     // 转发请求
     void ForwardRequest(int client_socket) {
         int server_index;
@@ -205,35 +269,30 @@ private:
         close(client_socket);
     }
 
-    // Zookeeper 回调函数
-    static void ExistsCallback(int rc, const struct Stat *stat, const void *data) {
-        if (rc == ZOK) {
-            cout << "Node exists." << endl;
-        } else if (rc == ZNONODE) {
-            cerr << "Node does not exist." << endl;
-        } else {
-            cerr << "Error checking node existence: " << zerror(rc) << endl;
-        }
+    // 注册负载均衡节点信息
+    void RegisterBalancerNode() {
+        string balancer_node_path = balancer_root_path_ + "/" + balancer_ip_ + ":" + to_string(balancer_port_);
+        cout<<"balancer_node_path: "<<balancer_node_path<<'\n';
+        string balancer_data = balancer_ip_ + ":" + to_string(balancer_port_);
+
+        // 异步创建临时节点
+        zoo_acreate(balancer_zh_, balancer_node_path.c_str(), balancer_data.c_str(), balancer_data.size(),
+                    &ZOO_OPEN_ACL_UNSAFE, ZOO_EPHEMERAL,
+                    [](int rc, const char *value, const void *data) {
+                        if (rc == ZOK) {
+                            cout << "Balancer node registered successfully: " << value << endl;
+                        } else {
+                            cerr << "Failed to register balancer node, error: " << zerror(rc) << endl;
+                        }
+                    },
+                    nullptr);
     }
-
-    static void GetChildrenCallback(int rc, const struct String_vector *strings, const void *data) {
-        if (rc != ZOK) {
-            cerr << "Failed to get children: " << zerror(rc) << endl;
-            return;
-        }
-
-        cout << "Children nodes: ";
-        for (int i = 0; i < strings->count; ++i) {
-            cout << strings->data[i] << " ";
-        }
-        cout << endl;
-    }
-
-    static void CreateCallback(int rc, const char *name, const void *data) {
-        if (rc == ZOK) {
-            cout << "Node created successfully: " << name << endl;
-        } else {
-            cerr << "Failed to create node: " << zerror(rc) << endl;
+    
+    static void ServerWatcher(zhandle_t *zh, int type, int state, const char *path, void *watcherCtx) {
+        if (type == ZOO_CHILD_EVENT && path == string("/servers")) {
+            cout << "Server list changed. Updating..." << endl;
+            LoadBalancer *lb = static_cast<LoadBalancer *>(watcherCtx);
+            lb->UpdateServerList();
         }
     }
 };
@@ -276,14 +335,14 @@ string GetLocalIPAddress() {
 }
 
 int main() {
-    string server_zookeeper_hosts = "192.168.1.1:2181,192.168.1.2:2181";
+    string server_zookeeper_hosts = "192.168.248.111:2181,192.168.248.112:2181,192.168.248.113:2181";
     string balancer_zookeeper_hosts = "192.168.248.111:2181,192.168.248.112:2181,192.168.248.113:2181";
     string balancer_ip = GetLocalIPAddress();
     cout<<balancer_ip;
-    int balancer_port = 8080;
+    int balancer_port = 5011;
 
-    //LoadBalancer load_balancer(server_zookeeper_hosts, balancer_zookeeper_hosts, balancer_ip, balancer_port);
-    //load_balancer.Start();
+    LoadBalancer load_balancer(server_zookeeper_hosts, balancer_zookeeper_hosts, balancer_ip, balancer_port);
+    load_balancer.Start();
 
     return 0;
 }

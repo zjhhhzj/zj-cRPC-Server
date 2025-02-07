@@ -1,6 +1,7 @@
 //g++ client.cpp rpc.pb.cc -o client -lprotobuf -lzookeeper_mt
 #include <iostream>
 #include <string>
+#include <vector>
 #include <sys/socket.h>
 #include <arpa/inet.h>
 #include <unistd.h>
@@ -15,21 +16,27 @@ vector<string> load_balancer_nodes;
 // Zookeeper 回调函数
 void watcher(zhandle_t* zh, int type, int state, const char* path, void* watcherCtx) {}
 
-// 获取负载均衡节点
-void getLoadBalancerNodes(zhandle_t* zh, const string& path) {
-    struct String_vector children;
-    int ret = zoo_get_children(zh, path.c_str(), 0, &children);
-    if (ret != ZOK) {
-        cerr << "Error getting children: " << zerror(ret) << endl;
+// 异步获取负载均衡节点的回调函数
+void GetChildrenCallback(int rc, const struct String_vector* strings, const void* data) {
+    if (rc != ZOK) {
+        cerr << "Error getting children: " << zerror(rc) << endl;
         return;
     }
 
     load_balancer_nodes.clear();
-    for (int i = 0; i < children.count; ++i) {
-        load_balancer_nodes.emplace_back(children.data[i]);
+    for (int i = 0; i < strings->count; ++i) {
+        load_balancer_nodes.emplace_back(strings->data[i]);
     }
 
-    deallocate_String_vector(&children);
+    cout << "Load balancer nodes updated successfully." << endl;
+}
+
+// 获取负载均衡节点（异步版本）
+void getLoadBalancerNodes(zhandle_t* zh, const string& path) {
+    int ret = zoo_aget_children(zh, path.c_str(), 0, GetChildrenCallback, nullptr);
+    if (ret != ZOK) {
+        cerr << "Error initiating async get children: " << zerror(ret) << endl;
+    }
 }
 
 // RPC 客户端类
@@ -101,8 +108,11 @@ int main() {
     }
 
     // 获取负载均衡节点
-    string path = "/load_balancers";
+    string path = "/balancers";
     getLoadBalancerNodes(zh, path);
+
+    // 等待异步回调完成
+    sleep(1); // 简单的等待方式，实际应用中可以使用更优雅的同步机制
 
     if (load_balancer_nodes.empty()) {
         cerr << "No available load balancer nodes!" << endl;
